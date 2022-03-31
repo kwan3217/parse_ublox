@@ -112,6 +112,87 @@ def dump_bin(buf,word_len=4, words_per_line=8):
                 print(" ",end='')
         print("")
 
+ublox_names={
+    0x05:("ACK",{0x01:"ACK",
+                 0x00:"NAK"}),
+    0x06:("CFG",{0x13:"ANT",
+                 0x09:"CFG",
+                 0x06:"DAT",
+                 0x70:"DGNSS",
+                 0x69:"GEOFENCE",
+                 0x3e:"GNSS",
+                 0x02:"INF",
+                 0x39:"ITFM",
+                 0x47:"LOGFILTER",
+                 0x01:"MSG",
+                 0x24:"NAV5",
+                 0x23:"NAVX5",
+                 0x17:"NMEA",
+                 0x1e:"ODO",
+                 0x00:"PRT",
+                 0x57:"PWR",
+                 0x08:"RATE",
+                 0x34:"RINV",
+                 0x04:"RST",
+                 0x16:"SBAS",
+                 0x71:"TMODE3",
+                 0x31:"TP5",
+                 0x1b:"USB",
+                 0x8c:"VALDEL",
+                 0x8b:"VALGET",
+                 0x8a:"VALSET"}),
+    0x0a:("MON",{0x04:"VER"}),
+    0x29:("NAV2",{0x22:"CLOCK",
+                  0x36:"COV",
+                  0x04:"DOP",
+                  0x61:"EOE",
+                  0x09:"ODO",
+                  0x01:"POSECEF",
+                  0x02:"POSLLH",
+                  0x07:"PVT",
+                  0x35:"SAT",
+                  0x32:"SBAS",
+                  0x43:"SIG",
+                  0x42:"SLAS",
+                  0x03:"STATUS",
+                  0x3b:"SVIN",
+                  0x24:"TIMEBDS",
+                  0x25:"TIMEGAL",
+                  0x23:"TIMEGLO",
+                  0x20:"TIMEGPS",
+                  0x26:"TIMELS",
+                  0x27:"TIMEQZSS",
+                  0x21:"TIMEUTC",
+                  0x11:"VELECEF",
+                  0x12:"VELNED"}),
+    0x02:("RXM",{0x34:"COR",
+                 0x14:"MEASX",
+                 0x72:"PMP",
+                 0x41:"PMREQ",
+                 0x73:"QZSSL6",
+                 0x15:"RAWX",
+                 0x59:"RLM",
+                 0x32:"RTCM",
+                 0x13:"SFRBX",
+                 0x33:"SPARTN",
+                 0x36:"SPARTNKEY"})
+}
+
+def print_ublox(packet):
+    cls=packet[2]
+    id=packet[3]
+    length=len(packet)-10
+    payload=packet[8:-2]
+    clsname = f"0x{cls:02x}"
+    idname = f"0x{id:02x}"
+    if cls in ublox_names:
+        clsname=ublox_names[cls][0]
+        if id in ublox_names[cls][1]:
+            idname=ublox_names[cls][1][id]
+    name=f"UBX-{clsname}-{idname}"
+    print(name)
+    dump_bin(payload)
+
 
 def main():
     with open("fluttershy_220331_150823.ubx","rb") as inf:
@@ -120,7 +201,7 @@ def main():
             if packet_type==PacketType.NMEA:
                 print(packet)
             elif packet_type==PacketType.UBLOX:
-                dump_bin(packet)
+                print_ublox(packet)
                 pass
 
 
