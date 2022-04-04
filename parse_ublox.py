@@ -8,6 +8,10 @@ from collections import namedtuple
 from functools import partial
 from struct import unpack
 from enum import Enum
+import traceback
+
+from parse_rtcm import parse_rtcm
+
 
 class PacketType(Enum):
     NMEA = 1
@@ -97,7 +101,7 @@ def next_packet(inf,reject_invalid=True,nmea_max=None):
         # are significant), n-byte payload, three byte CRC
         #Start of UBlox header
         header=header_peek+inf.read(2)
-        length=unpack('>H',header[1:3])[0] & 0x3f
+        length=unpack('>H',header[1:3])[0] & 0x3ff
         payload=inf.read(length)
         ck=inf.read(3)
         if not reject_invalid or ublox_ck_valid(payload,ck[0],ck[1]):
@@ -683,31 +687,27 @@ subframe_123={
 }
 
 
-def get_bits(dwrd, b0, b1):
-    dwrd_i = (b0 - 1) // 30
-    rel_0 = b0 - (dwrd_i) * 30
-    rel_1 = b1 - (dwrd_i) * 30
-    width = rel_1 - rel_0 + 1
-    shift = 30 - rel_1
-    mask = (1 << width) - 1
-    return (dwrd[dwrd_i]>>shift) & mask
-
-
-def get_multi_bits(dwrd,parts,signed):
-    result=0
-    width=0
-    for (b0,b1) in parts:
-        result=result<<(b1-b0+1)
-        result=result | get_bits(dwrd,b0,b1)
-        width+=(b1-b0+1)
-    if signed:
-        cutoff=1<<(width-1)
-        if result>=cutoff:
-            result-=2*cutoff
-    return result
-
-
 def parse_gps_sfrbx(packet):
+    def get_bits(dwrd, b0, b1):
+        dwrd_i = (b0 - 1) // 30
+        rel_0 = b0 - (dwrd_i) * 30
+        rel_1 = b1 - (dwrd_i) * 30
+        width = rel_1 - rel_0 + 1
+        shift = 30 - rel_1
+        mask = (1 << width) - 1
+        return (dwrd[dwrd_i] >> shift) & mask
+    def get_multi_bits(dwrd, parts, signed):
+        result = 0
+        width = 0
+        for (b0, b1) in parts:
+            result = result << (b1 - b0 + 1)
+            result = result | get_bits(dwrd, b0, b1)
+            width += (b1 - b0 + 1)
+        if signed:
+            cutoff = 1 << (width - 1)
+            if result >= cutoff:
+                result -= 2 * cutoff
+        return result
     names=[]
     values=[]
     subframe=get_bits(packet.dwrd,50,52)
@@ -726,12 +726,13 @@ def parse_gps_sfrbx(packet):
     else:
         return None
 
-
-
 def main():
-    with open("fluttershy_surveyed_220402_190201.ubx","rb") as inf:
+    with open("fluttershy_rtcm3_220404_181911.ubx","rb") as inf:
+        ofs=0
         while True:
             packet_type,packet=next_packet(inf)
+            print(f"ofs: {ofs:08x}, pkt_len: {len(packet)}")
+            ofs+=len(packet)
             if packet_type==PacketType.NMEA:
                 print(packet)
             elif packet_type==PacketType.UBLOX:
@@ -742,13 +743,16 @@ def main():
                         parsed_subframe=parse_gps_sfrbx(parsed_packet)
                         print(parsed_subframe)
                 except struct.error:
-                    import traceback
                     traceback.print_exc()
                     dump_bin(packet)
             elif packet_type==PacketType.RTCM:
-                dump_bin(packet)
+                try:
+                    parsed_packet=parse_rtcm(packet,verbose=False)
+                    print(parsed_packet)
+                except AssertionError:
+                    traceback.print_exc()
+                    dump_bin(packet)
 
 
 if __name__=="__main__":
-    get_multi_bits([0xffffffff],[(1,8)],True)
     main()
