@@ -1,148 +1,12 @@
-"""
-Code to parse a stream of data from a UBlox reveiver (not necessarily just UBlox packets)
-and do useful things with the data.
-"""
 import re
-import struct
 from collections import namedtuple
+from enum import Enum
 from functools import partial
 from struct import unpack
-from enum import Enum
-import traceback
 
-from parse_rtcm import parse_rtcm
+from bin import dump_bin
+from parse_l1ca_nav import parse_l1ca_subframe
 
-
-class PacketType(Enum):
-    NMEA = 1
-    UBLOX = 2
-    RTCM = 3
-
-
-def ublox_ck_valid(payload:bytes,ck_a:int,ck_b:int):
-    """
-    Check the checksum of a UBlox packet
-
-    :param payload:
-    :param ck_a:
-    :param ck_b:
-    :return:
-    """
-    return True
-
-
-def nmea_ck_valid(packet:bytes,has_checksum):
-    """
-    Check the checksum of an NMEA packet
-
-    :param packet:
-    :return:
-    """
-    return True
-
-
-def rtcm_ck_valid(packet:bytes):
-    """
-    Check the checksum of an RTCM packet
-
-    :param packet:
-    :return:
-    """
-    return True
-
-
-def next_packet(inf,reject_invalid=True,nmea_max=None):
-    """
-
-    :param inf:
-    :param reject_invalid:
-    :param nmea_max:
-    :return:
-    """
-    header_peek=inf.read(1)
-    if header_peek[0]==ord('$'):
-        #Looks like an NMEA packet, read until the asterisk
-        result=header_peek
-        while result[-1]!=ord('*'):
-            result+=inf.read(1)
-        #Read either 0D0A or checksum
-        result+=inf.read(2)
-        has_checksum=False
-        if not (result[0]==0x0d and result[1]==0x0a):
-            result+=inf.read(2)
-            has_checksum=True
-        if not reject_invalid or nmea_ck_valid(result,has_checksum):
-            return PacketType.NMEA, str(result,encoding='cp437').strip()
-        else:
-            return None, None
-    elif header_peek[0]==0xb5:
-        #Start of UBlox header
-        header=header_peek+inf.read(1)
-        if header[1]==0x62:
-            #Header is valid, read the entire packet
-            header=header+inf.read(4)
-            cls=header[2]
-            id=header[3]
-            length=unpack('<H',header[4:6])[0]
-            payload=inf.read(length)
-            ck=inf.read(2)
-            if not reject_invalid or ublox_ck_valid(payload,ck[0],ck[1]):
-                return PacketType.UBLOX, header+payload+ck
-            else:
-                #Checksum failed. Advanced past the whole packet, but packet is not returned.
-                return None,None
-        else:
-            #Not a ublox packet. We wish we could push back, but won't for now. Know that
-            #the stream has been advanced by two bytes. If there is a stray 0xb5 (mu) before
-            #an actual packet, this will cause the packet to be missed.
-            return None,None
-    elif header_peek[0]==0xd3:
-        # Start of RTCM packet. One byte preamble, two-byte big-endian length (only 10 ls bits
-        # are significant), n-byte payload, three byte CRC
-        #Start of UBlox header
-        header=header_peek+inf.read(2)
-        length=unpack('>H',header[1:3])[0] & 0x3ff
-        payload=inf.read(length)
-        ck=inf.read(3)
-        if not reject_invalid or ublox_ck_valid(payload,ck[0],ck[1]):
-            return PacketType.RTCM, header+payload+ck
-        else:
-            #Checksum failed. Advanced past the whole packet, but packet is not returned.
-            return None,None
-    else:
-        # Not either kind of packet we can recognize. Return None, and know that the
-        # data stream has had one byte consumed.
-        return None,None
-
-
-        #  x0    x1    x2    x3    x4    x5    x6    x7    x8    x9    xa    xb    xc    xd    xe    xf
-low_sub=('\u2400\u263A\u263b\u2665\u2666\u2663\u2660\u2022\u25d8\u25cb\u25d9\u2642\u2640\u266a\u266b\u263c'+
-         '\u25ba\u25c4\u2195\u203c\u00b6\u00a7\u25ac\u21a8\u2191\u2193\u2192\u2190\u221f\u2194\u25b2\u25bc\u2420')
-
-
-def dump_bin(buf,word_len=4, words_per_line=8):
-    line_len = word_len * words_per_line
-    for i_line in range((len(buf) // line_len)+1):
-        i_line0 = i_line * line_len
-        i_line1 = (i_line + 1) * line_len
-        print(f"{i_line0:04x} - ", end='')
-        for i_byte_in_line, i_byte in enumerate(range(i_line0, i_line1)):
-            if i_byte<len(buf):
-                print(f"{buf[i_byte]:02x}",end='')
-            else:
-                print("  ",end='')
-            if (i_byte_in_line + 1) % 4 == 0:
-                print(" ", end='')
-        print("|",end='')
-        for i_byte_in_line, i_byte in enumerate(range(i_line0, i_line1)):
-            if i_byte < len(buf):
-                if buf[i_byte]<len(low_sub):
-                    print(low_sub[buf[i_byte]],end='')
-                else:
-                    print(str(buf[i_byte:i_byte+1],encoding='iso8859-1'),end='')
-            else:
-                print(" ",end='')
-        print("")
 
 class GNSS(Enum):
     GPS=0
@@ -153,6 +17,65 @@ class GNSS(Enum):
     QZSS=5
     GLO=6
     NavIC=7
+
+
+class GPS_SigID(Enum):
+    L1CA=0
+    L2CL=3
+    L2CM=4
+    L5I=6
+    L5Q=7
+
+
+class SBAS_SigID(Enum):
+    L1CA=0
+
+
+class GAL_SigID(Enum):
+    E1C=0
+    E1B=1
+    E5AI=3
+    E5AQ=4
+    E5BI=5
+    E5BQ=6
+
+
+class BDS_SigID(Enum):
+    B1D1=0
+    B1D2=1
+    B2D1=2
+    B2D2=3
+    B1C=5
+    B2A=7
+
+
+class QZSS_SigID(Enum):
+    L1CA=0
+    L1S=1
+    L2CM=4
+    L2CL=5
+    L5I=8
+    I5Q=9
+
+
+class GLO_SigID(Enum):
+    L1OF=0
+    L2OF=2
+
+
+class NavIC_SigID(Enum):
+    L5A=0
+
+
+SIGID={
+    GNSS.GPS: GPS_SigID,
+    GNSS.SBAS: SBAS_SigID,
+    GNSS.GAL: GAL_SigID,
+    GNSS.BDS: BDS_SigID,
+    GNSS.QZSS: QZSS_SigID,
+    GNSS.GLO: GLO_SigID,
+    GNSS.NavIC: NavIC_SigID,
+}
 
 
 class ANTSTAT(Enum):
@@ -174,6 +97,55 @@ class LAYER(Enum):
     BBR=1
     Flash=2
     Default=7
+
+
+class QIND(Enum):
+    NOSIG=0
+    SEARCH=1
+    ACQ=2
+    DET_UNU=3
+    CODE_SYNC=4
+    CODE_CAR_SYNC5=5
+    CODE_CAR_SYNC6=6
+    CODE_CAR_SYNC7=7
+
+
+class CSRC(Enum):
+    NONE=0
+    SBAS=1
+    BDS=2
+    RTCM2=3
+    RTCM3_OSR=4
+    RTCM3_SSR=5
+    QZSS=6
+    SPARTN=7
+    CLAS=8
+
+
+class IONO(Enum):
+    NONE=0
+    KLOBUCHAR_GPS=1
+    SBAS=2
+    KLOBUCHAR_BDS=3
+    DUAL_FREQ=8
+
+
+class FIX(Enum):
+    NONE=0
+    DR_ONLY=1
+    TWOD=2
+    THREED=3
+    GPS_DR=4
+    TIME=5
+
+
+class RESET(Enum):
+    WDOG=0
+    SW=1
+    SW_GNSS=2
+    HW_SHUTDN=4
+    GNSS_STOP=8
+    GNSS_START=9
 
 
 ublox_packets={
@@ -198,7 +170,11 @@ ublox_packets={
                  0x57:("PWR",),
                  0x08:("RATE",),
                  0x34:("RINV",),
-                 0x04:("RST",),
+                 0x04:("RST",{
+                     "navBbrMask":("X2",None,None,None),
+                     "resetMode":("U1",RESET,None,"%20s"),
+                     "reserved0":("X1",None,None,None)
+                 }),
                  0x16:("SBAS",),
                  0x71:("TMODE3",),
                  0x31:("TP5",),
@@ -324,10 +300,52 @@ ublox_packets={
                   0x10:("RESETODO",),
                   0x35:("SAT",),
                   0x32:("SBAS",),
-                  0x43:("SIG",),
+                  0x43:("SIG",{
+                      "iTOW": ("U4", 1e-3, "s", "%10.3f"),
+                      "version":("U1",None,None,None),
+                      "numSigs":("U1",None,None,None),
+                      "reserved0":("X2",None,None,None),
+                      "gnssId[N]": ("U1", GNSS, None, "%10s"),
+                      "svId[N]": ("U1", None, None, None),
+                      "sigId[N]": ("U1", None, None, "%15s"),
+                      "freqId[N]": ("U1", None, None, None),
+                      "prRes[N]": ("I2",1e-1,"m","%5.1f"),
+                      "cno[N]":   ("U1",None,"dBHz",None),
+                      "qualityInd[N]": ("U1",QIND,None,"%20s"),
+                      "corrSource[N]": ("U1", CSRC, None, "%20s"),
+                      "ionoModel[N]": ("U1", IONO, None, "%20s"),
+                      "sigFlags[N]":("X2",None,None,None),
+                      "reserved1[N]":("X4",None,None,None),
+                  }),
                   0x42:("SLAS",),
-                  0x03:("STATUS",),
-                  0x3b:("SVIN",),
+                  0x03:("STATUS",{
+                      "iTOW": ("U4", 1e-3, "s", "%10.3f"),
+                      "gpsFix":("U1",FIX,None,"%20s"),
+                      "flags":("X1",None,None,None),
+                      "fixStat":("X1",None,None,None),
+                      "flags2":("X1",None,None,None),
+                      "ttff":("U4",1e-3,"s","%12.3f"),
+                      "msss": ("U4", 1e-3, "s", "%12.3f"),
+                  }),
+                  0x3b:("SVIN",{
+                      "version":("U1",None,None,None),
+                      "reserved0A":("X1",None,None,None),
+                      "reserved0B":("X2",None,None,None),
+                      "iTOW": ("U4", 1e-3, "s", "%10.3f"),
+                      "dur": ("U4", None, "s", None),
+                      "meanX":("I4",1e-2,"m","%12.2f"),
+                      "meanY":("I4", 1e-2, "m", "%12.2f"),
+                      "meanZ":("I4", 1e-2, "m", "%12.2f"),
+                      "meanXHP": ("I1", 1e-4, "m", "%7.4f"),
+                      "meanYHP": ("I1", 1e-4, "m", "%7.4f"),
+                      "meanZHP": ("I1", 1e-4, "m", "%7.4f"),
+                      "reserved1": ("X1", None, None, None),
+                      "meanAcc": ("U4", 1e-4, "m", "%12.4f"),
+                      "obs": ("U4", None, None, None),
+                      "valid": ("U1", bool, None, None),
+                      "active": ("U1", bool, None, None),
+                      "reserved2": ("X2", None, None, None),
+                  }),
                   0x24:("TIMEBDS",),
                   0x25:("TIMEGAL",),
                   0x23:("TIMEGLO",),
@@ -379,7 +397,7 @@ ublox_packets={
                                "doMes[N]":    ("R4",None,"Hz","%21.4f"),
                                "gnssId[N]":   ("U1",GNSS,None,"%10s"),
                                "svId[N]":     ("U1",None,None,None),
-                               "sigId[N]":    ("U1",None,None,None),
+                               "sigId[N]":    ("U1",None,None,"%15s"),
                                "freqId[N]":   ("U1",None,None,None),
                                "locktime[N]": ("U2",1e-3,"s","%6.3f"),
                                "cno[N]":      ("U1",None,"dBHz",None),
@@ -393,7 +411,7 @@ ublox_packets={
                  0x32:("RTCM",),
                  0x13:("SFRBX",{"gnssId":   ("U1",GNSS,None,"%10s"),
                                 "svId":     ("U1",None,None,None),
-                                "sigId":    ("U1",None,None,None),
+                                "sigId":    ("U1",None,None,"%20s"),
                                 "freqId":   ("U1",None,None,None),
                                 "numWords": ("U1",None,None,None),
                                 "chn":      ("U1",None,None,None),
@@ -543,7 +561,13 @@ def parse_ublox(packet):
     idname=f"UBX_{clsname}_{idname}"
     if packet_desc.b>0:
         unscaled_header=unpack(packet_desc.ht,payload[0:packet_desc.b])
-        header=tuple([scale(field) for field,scale in zip(unscaled_header,packet_desc.hs)])
+        header=[scale(field) for field,scale in zip(unscaled_header,packet_desc.hs)]
+        if "gnssId" in packet_desc.hn and "sigId" in packet_desc.hn:
+            gnssId = header[packet_desc.hn.index("gnssId")]
+            sigId = header[packet_desc.hn.index("sigId")]
+            sigId=SIGID[gnssId](sigId)
+            header[packet_desc.hn.index("sigId")]=sigId
+        header=tuple(header)
     else:
         header=tuple()
     if packet_desc.m>0:
@@ -565,6 +589,12 @@ def parse_ublox(packet):
             row=[scale(field) for field,scale in zip(unscaled_row,packet_desc.bs)]
             for i_col,element in enumerate(row):
                 cols[i_col][i_row]=element
+        if "gnssId" in packet_desc.bn and "sigId" in packet_desc.bn:
+            for i_row in range(n_rows):
+                gnssId = cols[packet_desc.bn.index("gnssId")][i_row]
+                sigId =  cols[packet_desc.bn.index("sigId" )][i_row]
+                sigId=SIGID[gnssId](sigId)
+                cols[packet_desc.bn.index("sigId")][i_row]=sigId
         if packet_desc.c>0:
             unscaled_footer = unpack(packet_desc.ft, payload[packet_desc.b+packet_desc.m*n_rows:])
             footer = tuple([scale(field) for field, scale in zip(unscaled_footer, packet_desc.hs)])
@@ -574,8 +604,20 @@ def parse_ublox(packet):
         cols=tuple()
         footer=tuple()
         n_rows=0
+
+
     returntype=namedtuple(idname," ".join(packet_desc.hn+packet_desc.bn+packet_desc.fn)+" cls id name n_rep payload desc")
-    return returntype._make(header+cols+footer+(cls,id,name,n_rows,payload,packet_desc))
+    result=returntype._make(header+cols+footer+(cls,id,name,n_rows,payload,packet_desc))
+    if (result.name == "UBX-RXM-SFRBX") and (result.gnssId == GNSS.GPS) and (result.sigId == 0):
+        subframe,sfu,sff= parse_l1ca_subframe(result)
+        if subframe is not None:
+            returntype=namedtuple(f"{idname}_L1CA{subframe.subframe}"," ".join(tuple(packet_desc.hn)+subframe._fields)+" cls id name n_rep payload desc")
+            packet_desc=packet_desc._replace(hn=packet_desc.hn+list(subframe._fields),
+                                             hu=packet_desc.hu+sfu,
+                                             hf=packet_desc.hf+sff,
+                                             bn=[],bt='<',bs=[],bu=[],bf=[],m=0)
+            result=returntype._make(header+subframe+(cls,id,name,0,payload,packet_desc))
+    return result
 
 
 def print_ublox(packet):
@@ -616,143 +658,3 @@ def print_ublox(packet):
     else:
         raise ValueError(f"No packet description for {packet.name}")
 
-# GPS L1C/A Nav Message description. Each field consists of:
-# key is name of field
-# value is tuple
-#  * list of tuples, each indicating the start and end bit of a part of the value. Most fields
-#    are contiguous, so there is only one entry in the list. If a field is discontiguous, each part
-#    will be ordered in the list such that the more significant parts are earlier. Each tuple is the
-#    start and end bits of the field part, numbered according to the ICD convention of bit 1 being
-#    the most significant bit of dwrd[0], bit 31 being most significant of dwrd[1], etc. No part will
-#    ever cross a word boundary (IE not something like 25,35) because the parity bits always delimit
-#    each word. Starts and ends are inclusive (unlike Python in general, where start is included but
-#    end is not). So, the preamble is bits 1-8, and should always be the preamble value 0x8B.
-#  * True if value is twos-complement signed, False if unsigned
-#  * Scaling factor or function, or None if the scaling is identity.
-#  * Physical units of scaled value, or None if there are none.
-#  * Recommended format string, suitable for the % operator.
-#
-tlm_struct={
-    "preamble":([(1,8)],False,None,None,"%02x"),
-    "tlm":([(9,22)],False,None,None,"%04x"),
-    "integ_stat":([(24,24)],False,None,None,"%01x"),
-}
-
-how_struct={
-    "tow_count":([(31,47)],False,None,None,None),
-    "alert":([(48,48)],False,None,None,None),
-    "antispoof":([(49,49)],False,None,None,None),
-    "subframe":([(50,52)],False,None,None,None),
-}
-
-def ura_nom(N):
-    if N==1:
-        return 2.8
-    if N==3:
-        return 5.7
-    if N==5:
-        return 11.3
-    if N==15:
-        return float('inf')
-    if N<=6:
-        return 2**(1+N/2)
-    return 2**(N-2)
-
-subframe_123={
-    1:{**tlm_struct,**how_struct,
-        "wn":([(61,70)],False,None,"week",None),
-        "msg_on_l2":([(71,72)],False,None,None,None),
-        "ura":([(73,76)],False,ura_nom,None,None),
-        "sv_health":([(77,82)],False,None,None,None),
-        "iodc":([(83,84),(211,218)],False,None,None,None),
-        "t_gd":([(197,197+8-1)],True,2**-31,"s",None),
-        "t_oc":([(219,219+16-1)],False,2**4,"s",None),
-        "a_f2":([(241,241+8-1)],True,2**-55,"s/s**2",None),
-        "a_f1":([(241+8,241+8+16-1)],True,2**-43,"s/s",None),
-        "a_f0":([(271,271+22-1)],True,2**-31,"s",None)
-    },
-    2:{**tlm_struct,**how_struct,
-        "iode":([(61,68)],False,None,"week",None),
-        "c_rs":([(69,69+16-1)],True,2**-5,"m",None),
-        "delta_n":([(91,106)],True,2**-43,"semicircle/s",None),
-        "M_0":([(107,107+8-1),(121,121+24-1)],True,2**-31,"semicircle",None),
-        "c_uc":([(151,166)],True,2**-29,"rad",None),
-        "e":([(167,167+8-1),(181,181+24-1)],False,2**-33,None,None),
-        "c_us":([(211,226)],True,2**-29,"rad",None),
-        "A":([(227,227+8-1),(241,241+24-1)],False,lambda sqrtA:(sqrtA*2**-19)**2,"m",None),
-        "t_oe":([(271,286)],False,2**4,"s",None),
-        "fit":([(287,287)],False,None,None,None),
-        "aodo": ([(288,288+5-1)], False,None,None,None),
-    },
-}
-
-
-def parse_gps_sfrbx(packet):
-    def get_bits(dwrd, b0, b1):
-        dwrd_i = (b0 - 1) // 30
-        rel_0 = b0 - (dwrd_i) * 30
-        rel_1 = b1 - (dwrd_i) * 30
-        width = rel_1 - rel_0 + 1
-        shift = 30 - rel_1
-        mask = (1 << width) - 1
-        return (dwrd[dwrd_i] >> shift) & mask
-    def get_multi_bits(dwrd, parts, signed):
-        result = 0
-        width = 0
-        for (b0, b1) in parts:
-            result = result << (b1 - b0 + 1)
-            result = result | get_bits(dwrd, b0, b1)
-            width += (b1 - b0 + 1)
-        if signed:
-            cutoff = 1 << (width - 1)
-            if result >= cutoff:
-                result -= 2 * cutoff
-        return result
-    names=[]
-    values=[]
-    subframe=get_bits(packet.dwrd,50,52)
-    if subframe==2:
-        print(2)
-    if subframe in subframe_123:
-        for name,(parts,signed,scale,units,fmt) in subframe_123[subframe].items():
-            names.append(name)
-            value=get_multi_bits(packet.dwrd,parts,signed)
-            if callable(scale):
-                value=scale(value)
-            elif scale is not None:
-                value=scale*value
-            values.append(value)
-        return namedtuple(f"subframe{subframe}", " ".join(names))._make(values)
-    else:
-        return None
-
-def main():
-    with open("fluttershy_rtcm3_220404_181911.ubx","rb") as inf:
-        ofs=0
-        while True:
-            packet_type,packet=next_packet(inf)
-            print(f"ofs: {ofs:08x}, pkt_len: {len(packet)}")
-            ofs+=len(packet)
-            if packet_type==PacketType.NMEA:
-                print(packet)
-            elif packet_type==PacketType.UBLOX:
-                try:
-                    parsed_packet=parse_ublox(packet)
-                    print_ublox(parsed_packet)
-                    if (parsed_packet.name=="UBX-RXM-SFRBX") and (parsed_packet.gnssId==GNSS.GPS) and (parsed_packet.sigId==0):
-                        parsed_subframe=parse_gps_sfrbx(parsed_packet)
-                        print(parsed_subframe)
-                except struct.error:
-                    traceback.print_exc()
-                    dump_bin(packet)
-            elif packet_type==PacketType.RTCM:
-                try:
-                    parsed_packet=parse_rtcm(packet,verbose=False)
-                    print(parsed_packet)
-                except AssertionError:
-                    traceback.print_exc()
-                    dump_bin(packet)
-
-
-if __name__=="__main__":
-    main()
